@@ -18,73 +18,79 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install ldid make wget
+          brew install ldid make
           echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
 
-      - name: Setup Theos (manual, reliable)
+      - name: Setup Theos
         run: |
           set -e
           export THEOS=$GITHUB_WORKSPACE/theos
           echo "THEOS=$THEOS" >> $GITHUB_ENV
 
-          # Clone Theos
           git clone --recursive --depth=1 https://github.com/theos/theos.git $THEOS
 
-          # Prepare sdks directory
           mkdir -p $THEOS/sdks
-
-          # Download official Theos SDKs
-          echo "Downloading SDKs..."
           cd /tmp
           curl -L --fail -o sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
           unzip -q sdks.zip
-          mv sdks-master/*.sdk $THEOS/sdks/ || true
-          ls -la $THEOS/sdks/
+          mv sdks-master/*.sdk $THEOS/sdks/
+          echo "SDKs installed:"
+          ls $THEOS/sdks/
 
-          # On macOS the Xcode toolchain is already available, so we don't need the Linux toolchain
-          echo "Theos ready at $THEOS"
-
-      - name: Build screenshot-bypass dylib
+      - name: Build SecretShot dylib (Substrate-free)
         run: |
           set -e
           export THEOS=$GITHUB_WORKSPACE/theos
           cd dylib
 
-          # Clean Makefile for this environment
-          cat > Makefile << 'EOF'
-          TARGET := iphone:clang:latest:15.0
-          ARCHS = arm64
-          include $(THEOS)/makefiles/common.mk
-          TWEAK_NAME = SecretShot
-          SecretShot_FILES = Tweak.x
-          SecretShot_CFLAGS = -fobjc-arc
-          SecretShot_FRAMEWORKS = UIKit
-          include $(THEOS_MAKE_PATH)/tweak.mk
-          EOF
-
           make clean || true
           make package FINALPACKAGE=1
 
-          # Locate the dylib
+          echo "===== Build outputs ====="
+          find .theos -type f -name "*.dylib" -o -name "*.so" 2>/dev/null || true
+          ls -la .theos/obj/ 2>/dev/null || true
+
           DYLIB=$(find .theos -name "SecretShot.dylib" -type f | head -n1)
           if [ -z "$DYLIB" ]; then
             DYLIB=$(find . -name "*.dylib" -type f | head -n1)
           fi
-          echo "Found dylib: $DYLIB"
+
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: No dylib produced"
+            exit 1
+          fi
+
+          echo "Found: $DYLIB"
+          ls -lh "$DYLIB"
+          file "$DYLIB"
+
+          SIZE=$(stat -f%z "$DYLIB" 2>/dev/null || stat -c%s "$DYLIB")
+          echo "Size: $SIZE bytes"
+
+          if [ "$SIZE" -lt 10000 ]; then
+            echo "ERROR: dylib is too small ($SIZE bytes) – build failed"
+            exit 1
+          fi
+
+          # Verify it's arm64 Mach-O
+          if ! file "$DYLIB" | grep -q "arm64"; then
+            echo "ERROR: not an arm64 binary"
+            file "$DYLIB"
+            exit 1
+          fi
+
           cp "$DYLIB" $GITHUB_WORKSPACE/SecretShot.dylib
           ls -lh $GITHUB_WORKSPACE/SecretShot.dylib
           file $GITHUB_WORKSPACE/SecretShot.dylib
 
       - name: Download original IPA
         run: |
-          echo "Downloading IPA..."
           curl -L --fail -o original.ipa "${{ github.event.inputs.ipa_url }}"
           ls -lh original.ipa
 
       - name: Inject dylib and rebuild IPA
         run: |
           set -e
-          # Get optool
           curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip
           unzip -o optool.zip
           chmod +x optool
@@ -95,9 +101,12 @@ jobs:
           mkdir -p Payload/Snapchat.app/Frameworks
           cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/
 
-          ./../optool install -c load \
+          ../optool install -c load \
             -p "@executable_path/Frameworks/SecretShot.dylib" \
             -t Payload/Snapchat.app/Snapchat
+
+          # Quick verification that the load command was added
+          otool -L Payload/Snapchat.app/Snapchat | grep -i SecretShot || echo "WARNING: load command not visible (optool may have failed)"
 
           zip -r ../Snapchat-Patched.ipa Payload
           cd ..
