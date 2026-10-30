@@ -1,0 +1,9 @@
+Package: com.local.secretshot
+Name: SecretShot
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Snapchat screenshot and screen recording detection bypass
+Maintainer: local
+Author: local
+Section: Tweaks
+Depends: mobilesubstrate

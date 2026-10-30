@@ -1,23 +1,39 @@
 # juliacrypters – Snapchat IPA Patcher
 
-GitHub Actions workflow to download a large Snapchat IPA from Dropbox (or any direct link), inject a screenshot-bypass dylib, and produce a patched IPA as an artifact.
+Workflow that downloads a decrypted Snapchat IPA and injects a screenshot-detection bypass dylib.
 
-## How to use
+## Features targeted
+- Block screenshot & screen-recording detection (no notification on chats / friendship profiles)
+- Clean injection ready for sideloading with Feather / Sideloadly / TrollStore
 
-1. Upload your original Snapchat IPA to Dropbox.
-2. Get a **direct download link** (must end with `?dl=1` or be a raw binary URL).
-3. Go to the **Actions** tab → **Patch Snapchat IPA** → **Run workflow**.
-4. Paste the IPA URL.
-5. (Optional) Paste a direct URL to a compiled screenshot-bypass `.dylib` (SecretShot / Phantom style).
-6. Run the workflow. When it finishes, download the `Snapchat-Patched` artifact.
+## Current status
+- IPA download + re-pack works
+- Screenshot bypass **source** is included in `dylib/`
+- Real arm64 iOS dylib compilation requires Theos + iOS SDK (cannot be done on plain Ubuntu runner)
 
-## Notes
+## How to get a working patched IPA (first-try path)
 
-- The workflow only injects the dylib if you provide a `dylib_url`.
-- For the features you wanted (no screenshot notification on chats/profiles + local outfit unlocks) you still need a proper dylib that implements those hooks.
-- Large IPAs are fine – the workflow downloads them on the runner instead of storing them in the repo.
+### Option 1 – Easiest (recommended right now)
+1. Compile the dylib on a Mac with Theos (or use any existing SecretShot / Phantom-style dylib).
+2. Host the resulting `SecretShot.dylib` somewhere with a direct link.
+3. Run the workflow and paste the dylib URL.
 
-## Next steps
+### Option 2 – Compile yourself
+```bash
+# On a Mac with Theos installed
+cd dylib
+make package
+# The .dylib will be inside the .deb or in .theos/obj
+```
 
-- Provide the Dropbox link for the IPA.
-- Provide (or we can build) the screenshot-bypass + unlock dylib.
+Then re-run the workflow with the dylib URL.
+
+## Workflow inputs
+- `ipa_url` – already filled with your Dropbox link
+- `dylib_url` – direct link to a compiled arm64 `.dylib`
+
+## Artifact
+After a successful run you get `Snapchat-Patched.ipa` ready for Feather.
+
+---
+Source for the bypass is in `dylib/Tweak.x` (hooks `UIScreen isCaptured`).
