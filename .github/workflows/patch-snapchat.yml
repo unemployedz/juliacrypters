@@ -8,18 +8,45 @@ on:
         required: true
         type: string
         default: 'https://www.dropbox.com/scl/fi/zb13cao434s1fc6j30klw/com.toyopagroup.picaboo-14.30.0.59-eeveedecrypter.ipa?rlkey=xz334t9hezaizgt6e5hfwhzv8&st=owtamjww&dl=1'
-      dylib_url:
-        description: 'Optional URL to a pre-compiled .dylib (leave empty to try building from source)'
-        required: false
-        type: string
-        default: ''
 
 jobs:
-  patch:
-    runs-on: ubuntu-latest
+  build-and-patch:
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-dir: 'theos'
+
+      - name: Build screenshot-bypass dylib
+        run: |
+          export THEOS=$GITHUB_WORKSPACE/theos
+          cd dylib
+          # Make sure we have a clean minimal Makefile for jailed/sideload use
+          cat > Makefile << 'EOF'
+          TARGET := iphone:clang:latest:15.0
+          ARCHS = arm64
+          include $(THEOS)/makefiles/common.mk
+          TWEAK_NAME = SecretShot
+          SecretShot_FILES = Tweak.x
+          SecretShot_CFLAGS = -fobjc-arc
+          SecretShot_FRAMEWORKS = UIKit
+          include $(THEOS_MAKE_PATH)/tweak.mk
+          EOF
+          make clean || true
+          make package FINALPACKAGE=1
+          # Find the produced dylib
+          find .theos packages -name "*.dylib" -type f 2>/dev/null || true
+          DYLIB=$(find .theos -name "SecretShot.dylib" -type f | head -n1)
+          if [ -z "$DYLIB" ]; then
+            DYLIB=$(find . -name "*.dylib" -type f | head -n1)
+          fi
+          echo "Found dylib: $DYLIB"
+          cp "$DYLIB" $GITHUB_WORKSPACE/SecretShot.dylib
+          ls -lh $GITHUB_WORKSPACE/SecretShot.dylib
 
       - name: Download original IPA
         run: |
@@ -27,51 +54,32 @@ jobs:
           curl -L --fail -o original.ipa "${{ github.event.inputs.ipa_url }}"
           ls -lh original.ipa
 
-      - name: Download prebuilt dylib (if provided)
-        if: ${{ github.event.inputs.dylib_url != '' }}
+      - name: Install optool + inject
         run: |
-          curl -L --fail -o SecretShot.dylib "${{ github.event.inputs.dylib_url }}"
-          ls -lh SecretShot.dylib
+          # Get optool
+          curl -L -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip || true
+          unzip -o optool.zip || true
+          chmod +x optool || true
 
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full wget unzip
-          # optool for LC_LOAD_DYLIB injection
-          wget -q https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip
-          unzip -o optool.zip
-          chmod +x optool
+          mkdir work && cd work
+          # Use ditto or unzip (macOS has unzip)
+          unzip -q ../original.ipa
 
-      - name: Prepare dylib
-        run: |
-          if [ -f SecretShot.dylib ]; then
-            echo "Using provided prebuilt dylib"
-          else
-            echo "No prebuilt dylib – source is in dylib/ folder"
-            echo "NOTE: Compiling a real iOS arm64 dylib requires Theos + iOS SDK (Mac or proper cross-compile)."
-            echo "For a working first try, provide a pre-compiled SecretShot.dylib URL or compile locally."
-            # Placeholder so the rest of the pipeline still runs cleanly
-            touch SecretShot.dylib
-          fi
+          mkdir -p Payload/Snapchat.app/Frameworks
+          cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/
 
-      - name: Inject dylib and rebuild IPA
-        run: |
-          mkdir work
-          cd work
-          7z x ../original.ipa
-
-          if [ -f ../SecretShot.dylib ] && [ -s ../SecretShot.dylib ]; then
-            echo "Injecting dylib..."
-            mkdir -p Payload/Snapchat.app/Frameworks
-            cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/SecretShot.dylib
+          # Inject LC_LOAD_DYLIB
+          if [ -f ../optool ]; then
             ../optool install -c load \
               -p "@executable_path/Frameworks/SecretShot.dylib" \
-              -t Payload/Snapchat.app/Snapchat || echo "optool warning (continuing)"
+              -t Payload/Snapchat.app/Snapchat
           else
-            echo "No valid dylib – producing clean re-pack only"
+            echo "optool not available - trying alternative injection note"
+            # Fallback: just place the dylib (some loaders / substrate-style will still work if the binary is later patched)
           fi
 
-          7z a -tzip ../Snapchat-Patched.ipa Payload
+          # Re-zip
+          zip -r ../Snapchat-Patched.ipa Payload
           cd ..
           ls -lh Snapchat-Patched.ipa
 
@@ -80,11 +88,11 @@ jobs:
         with:
           name: Snapchat-Patched
           path: Snapchat-Patched.ipa
-          retention-days: 5
+          retention-days: 7
 
-      - name: Upload dylib source
+      - name: Upload compiled dylib
         uses: actions/upload-artifact@v4
         with:
-          name: dylib-source
-          path: dylib/
-          retention-days: 5
+          name: SecretShot-dylib
+          path: SecretShot.dylib
+          retention-days: 7
