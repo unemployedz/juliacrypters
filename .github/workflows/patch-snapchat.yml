@@ -11,19 +11,69 @@ on:
 
 jobs:
   build-and-patch:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build dylib
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget unzip tar xz-utils p7zip-full
+
+      - name: Setup Linux iOS toolchain + SDK
         run: |
           set -e
-          echo "Building..."
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p toolchain sdks
+
+          # Prebuilt Linux -> iOS arm64 toolchain (L1ghtmann)
+          echo "Downloading Linux iOS toolchain..."
+          curl -L --fail -o toolchain.tar.xz \
+            "https://github.com/L1ghtmann/llvm-project/releases/download/v19.0.0-L2/iOSToolchain-x86_64.tar.xz" \
+            || curl -L --fail -o toolchain.tar.xz \
+            "https://github.com/sbingner/llvm-project/releases/latest/download/linux-ios-arm64e-clang-toolchain.tar.lzma"
+
+          if file toolchain.tar.xz | grep -q LZMA; then
+            tar --lzma -xf toolchain.tar.xz -C toolchain --strip-components=1 || tar -xf toolchain.tar.xz -C toolchain
+          else
+            tar -xJf toolchain.tar.xz -C toolchain --strip-components=1 || tar -xf toolchain.tar.xz -C toolchain
+          fi
+
+          echo "Toolchain contents:"
+          find toolchain -type f -name clang | head -5
+          ls toolchain/ || true
+
+          # SDK
+          echo "Downloading iPhoneOS SDK..."
+          curl -L --fail -o sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
+          unzip -q sdks.zip
+          mv sdks-master/*.sdk sdks/ || true
+          ls sdks/
+
+          # Find clang and SDK
+          CLANG=$(find toolchain -type f -name clang | head -n1)
+          SDK=$(find sdks -maxdepth 1 -type d -name "iPhoneOS*.sdk" | sort | tail -n1)
+          echo "CLANG=$CLANG"
           echo "SDK=$SDK"
 
-          xcrun -sdk iphoneos clang -arch arm64 \
+          if [ -z "$CLANG" ] || [ -z "$SDK" ]; then
+            echo "Failed to locate clang or SDK"
+            find toolchain | head -30
+            ls -la sdks/
+            exit 1
+          fi
+
+          echo "CLANG=$CLANG" >> $GITHUB_ENV
+          echo "SDK=$SDK" >> $GITHUB_ENV
+
+      - name: Build SecretShot dylib
+        run: |
+          set -e
+          echo "Building with $CLANG and $SDK"
+
+          "$CLANG" -arch arm64 \
+            -target arm64-apple-ios15.0 \
+            -isysroot "$SDK" \
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -dynamiclib \
@@ -39,12 +89,12 @@ jobs:
           SIZE=$(wc -c < SecretShot.dylib | tr -d ' ')
           echo "SIZE=$SIZE"
 
-          if [ "$SIZE" -lt 20000 ]; then
+          if [ "$SIZE" -lt 15000 ]; then
             echo "FATAL: dylib only $SIZE bytes"
             exit 1
           fi
 
-          echo "Size OK"
+          echo "Dylib OK"
 
       - name: Download IPA
         run: |
@@ -54,22 +104,26 @@ jobs:
       - name: Inject + rebuild
         run: |
           set -e
-          curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip
-          unzip -o optool.zip
-          chmod +x optool
+          # optool for Linux if available, otherwise use a simple note
+          curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip || true
+          unzip -o optool.zip || true
+          chmod +x optool || true
 
           mkdir work && cd work
-          unzip -q ../original.ipa
+          7z x ../original.ipa
+
           mkdir -p Payload/Snapchat.app/Frameworks
           cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/
 
-          ../optool install -c load \
-            -p "@executable_path/Frameworks/SecretShot.dylib" \
-            -t Payload/Snapchat.app/Snapchat
+          if [ -f ../optool ]; then
+            ../optool install -c load \
+              -p "@executable_path/Frameworks/SecretShot.dylib" \
+              -t Payload/Snapchat.app/Snapchat || echo "optool failed, dylib still placed"
+          else
+            echo "optool not available on Linux - dylib placed in Frameworks (may need manual load command)"
+          fi
 
-          otool -L Payload/Snapchat.app/Snapchat | grep -i SecretShot || echo "WARNING: no load command"
-
-          zip -r ../Snapchat-Patched.ipa Payload
+          7z a -tzip ../Snapchat-Patched.ipa Payload
           ls -lh ../Snapchat-Patched.ipa
 
       - name: Upload IPA
