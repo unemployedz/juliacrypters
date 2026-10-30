@@ -19,47 +19,49 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar xz-utils p7zip-full
+          sudo apt-get install -y curl wget unzip tar xz-utils p7zip-full lzma
 
       - name: Setup Linux iOS toolchain + SDK
         run: |
           set -e
           mkdir -p toolchain sdks
 
-          # Prebuilt Linux -> iOS arm64 toolchain (L1ghtmann)
-          echo "Downloading Linux iOS toolchain..."
-          curl -L --fail -o toolchain.tar.xz \
-            "https://github.com/L1ghtmann/llvm-project/releases/download/v19.0.0-L2/iOSToolchain-x86_64.tar.xz" \
-            || curl -L --fail -o toolchain.tar.xz \
-            "https://github.com/sbingner/llvm-project/releases/latest/download/linux-ios-arm64e-clang-toolchain.tar.lzma"
+          echo "Downloading sbingner Linux iOS toolchain..."
+          curl -L --fail -o toolchain.tar.lzma \
+            "https://github.com/sbingner/llvm-project/releases/download/v10.0.0-2/linux-ios-arm64e-clang-toolchain.tar.lzma"
 
-          if file toolchain.tar.xz | grep -q LZMA; then
-            tar --lzma -xf toolchain.tar.xz -C toolchain --strip-components=1 || tar -xf toolchain.tar.xz -C toolchain
-          else
-            tar -xJf toolchain.tar.xz -C toolchain --strip-components=1 || tar -xf toolchain.tar.xz -C toolchain
+          tar --lzma -xf toolchain.tar.lzma -C toolchain
+
+          echo "Toolchain tree:"
+          find toolchain -maxdepth 3 -type d
+          find toolchain -name "clang*" -type f | head -10
+
+          # Expected layout: toolchain/ios-arm64e-clang-toolchain/bin/clang
+          CLANG=$(find toolchain -type f -name "clang" | head -n1)
+          if [ -z "$CLANG" ]; then
+            CLANG=$(find toolchain -type f -name "clang-10" | head -n1)
+          fi
+          if [ -z "$CLANG" ]; then
+            CLANG=$(find toolchain -type f -name "clang-*" | head -n1)
           fi
 
-          echo "Toolchain contents:"
-          find toolchain -type f -name clang | head -5
-          ls toolchain/ || true
+          echo "CLANG=$CLANG"
+          if [ -z "$CLANG" ]; then
+            echo "clang not found"
+            find toolchain | head -50
+            exit 1
+          fi
 
-          # SDK
-          echo "Downloading iPhoneOS SDK..."
+          # SDK - pick newest iPhoneOS
           curl -L --fail -o sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
           unzip -q sdks.zip
-          mv sdks-master/*.sdk sdks/ || true
+          mv sdks-master/*.sdk sdks/
           ls sdks/
 
-          # Find clang and SDK
-          CLANG=$(find toolchain -type f -name clang | head -n1)
-          SDK=$(find sdks -maxdepth 1 -type d -name "iPhoneOS*.sdk" | sort | tail -n1)
-          echo "CLANG=$CLANG"
+          SDK=$(ls -d sdks/iPhoneOS1*.sdk 2>/dev/null | sort -V | tail -n1)
           echo "SDK=$SDK"
-
-          if [ -z "$CLANG" ] || [ -z "$SDK" ]; then
-            echo "Failed to locate clang or SDK"
-            find toolchain | head -30
-            ls -la sdks/
+          if [ -z "$SDK" ]; then
+            echo "SDK not found"
             exit 1
           fi
 
@@ -69,7 +71,9 @@ jobs:
       - name: Build SecretShot dylib
         run: |
           set -e
-          echo "Building with $CLANG and $SDK"
+          echo "Building with:"
+          echo "  CLANG=$CLANG"
+          echo "  SDK=$SDK"
 
           "$CLANG" -arch arm64 \
             -target arm64-apple-ios15.0 \
@@ -104,23 +108,20 @@ jobs:
       - name: Inject + rebuild
         run: |
           set -e
-          # optool for Linux if available, otherwise use a simple note
-          curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip || true
-          unzip -o optool.zip || true
-          chmod +x optool || true
-
           mkdir work && cd work
           7z x ../original.ipa
 
           mkdir -p Payload/Snapchat.app/Frameworks
           cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/
 
-          if [ -f ../optool ]; then
-            ../optool install -c load \
-              -p "@executable_path/Frameworks/SecretShot.dylib" \
-              -t Payload/Snapchat.app/Snapchat || echo "optool failed, dylib still placed"
+          # Try optool (mac binary may not run); dylib is still in Frameworks
+          curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip || true
+          unzip -o optool.zip || true
+          chmod +x optool || true
+          if [ -f optool ] && file optool | grep -q ELF; then
+            ./optool install -c load -p "@executable_path/Frameworks/SecretShot.dylib" -t Payload/Snapchat.app/Snapchat || true
           else
-            echo "optool not available on Linux - dylib placed in Frameworks (may need manual load command)"
+            echo "optool not usable on Linux - dylib placed; load command may need Mac/optool later"
           fi
 
           7z a -tzip ../Snapchat-Patched.ipa Payload
