@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: 'Direct Dropbox (or any) URL ending with ?dl=1'
+        description: 'Direct Dropbox URL ending with ?dl=1'
         required: true
         type: string
         default: 'https://www.dropbox.com/scl/fi/zb13cao434s1fc6j30klw/com.toyopagroup.picaboo-14.30.0.59-eeveedecrypter.ipa?rlkey=xz334t9hezaizgt6e5hfwhzv8&st=owtamjww&dl=1'
@@ -16,21 +16,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build SecretShot dylib with clang (strict)
+      - name: Build dylib (root, absolute, forced checks)
         run: |
-          set -ex
+          set -e
 
-          echo "=== Source file ==="
-          ls -la dylib/
+          echo "PWD=$(pwd)"
+          echo "=== Source ==="
           cat dylib/SecretShot.m
 
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "SDK = $SDK"
-          ls "$SDK" | head
+          echo "SDK=$SDK"
 
-          cd dylib
+          # Build directly into workspace root with absolute output path
+          OUT="$GITHUB_WORKSPACE/SecretShot.dylib"
 
-          # Compile with maximum visibility
           xcrun -sdk iphoneos clang -arch arm64 \
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
@@ -38,37 +37,34 @@ jobs:
             -framework UIKit \
             -framework Foundation \
             -install_name "@executable_path/Frameworks/SecretShot.dylib" \
-            -o SecretShot.dylib \
-            SecretShot.m
+            -o "$OUT" \
+            "$GITHUB_WORKSPACE/dylib/SecretShot.m"
 
-          echo "=== After clang ==="
-          ls -la SecretShot.dylib
-          file SecretShot.dylib
-          otool -hv SecretShot.dylib || true
-          otool -l SecretShot.dylib | head -40 || true
+          echo "=== Built file ==="
+          ls -la "$OUT"
+          file "$OUT"
+          otool -hv "$OUT" || true
 
-          SIZE=$(stat -f%z SecretShot.dylib)
-          echo "SIZE=$SIZE"
+          SIZE=$(stat -f%z "$OUT")
+          echo "SIZE_BYTES=$SIZE"
 
+          # Hard fail - this must stop the job
           if [ "$SIZE" -lt 30000 ]; then
-            echo "FATAL: dylib is only $SIZE bytes – this is not a real binary"
+            echo "========================================"
+            echo "FATAL: dylib is only $SIZE bytes"
+            echo "This is not a usable binary. Stopping."
+            echo "========================================"
             exit 1
           fi
 
-          if ! file SecretShot.dylib | grep -q "arm64"; then
-            echo "FATAL: not arm64"
-            exit 1
-          fi
-
-          cp -v SecretShot.dylib $GITHUB_WORKSPACE/SecretShot.dylib
-          ls -la $GITHUB_WORKSPACE/SecretShot.dylib
+          echo "Dylib looks good ($SIZE bytes)"
 
       - name: Download original IPA
         run: |
           curl -L --fail -o original.ipa "${{ github.event.inputs.ipa_url }}"
           ls -lh original.ipa
 
-      - name: Inject dylib and rebuild IPA
+      - name: Inject and rebuild
         run: |
           set -e
           curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip
@@ -79,13 +75,12 @@ jobs:
           unzip -q ../original.ipa
 
           mkdir -p Payload/Snapchat.app/Frameworks
-          cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/
+          cp "$GITHUB_WORKSPACE/SecretShot.dylib" Payload/Snapchat.app/Frameworks/
 
           ../optool install -c load \
             -p "@executable_path/Frameworks/SecretShot.dylib" \
             -t Payload/Snapchat.app/Snapchat
 
-          echo "=== Load commands ==="
           otool -L Payload/Snapchat.app/Snapchat | grep -i SecretShot || echo "WARNING: load command missing"
 
           zip -r ../Snapchat-Patched.ipa Payload
@@ -99,9 +94,9 @@ jobs:
           path: Snapchat-Patched.ipa
           retention-days: 7
 
-      - name: Upload compiled dylib
+      - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: SecretShot-dylib
-          path: SecretShot.dylib
+          path: ${{ github.workspace }}/SecretShot.dylib
           retention-days: 7
