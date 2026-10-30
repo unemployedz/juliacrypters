@@ -19,7 +19,13 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar xz-utils p7zip-full lzma
+          sudo apt-get install -y curl wget unzip tar xz-utils p7zip-full lzma libtinfo5 libncurses5 || \
+          sudo apt-get install -y curl wget unzip tar xz-utils p7zip-full libncurses6
+          # Fallback symlink if only libtinfo6 exists
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libtinfo.so.5 ]; then
+            sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5 || true
+            sudo ln -sf /lib/x86_64-linux-gnu/libtinfo.so.6 /lib/x86_64-linux-gnu/libtinfo.so.5 || true
+          fi
 
       - name: Setup Linux iOS toolchain + SDK
         run: |
@@ -32,11 +38,6 @@ jobs:
 
           tar --lzma -xf toolchain.tar.lzma -C toolchain
 
-          echo "Toolchain tree:"
-          find toolchain -maxdepth 3 -type d
-          find toolchain -name "clang*" -type f | head -10
-
-          # Expected layout: toolchain/ios-arm64e-clang-toolchain/bin/clang
           CLANG=$(find toolchain -type f -name "clang" | head -n1)
           if [ -z "$CLANG" ]; then
             CLANG=$(find toolchain -type f -name "clang-10" | head -n1)
@@ -52,11 +53,9 @@ jobs:
             exit 1
           fi
 
-          # SDK - pick newest iPhoneOS
           curl -L --fail -o sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
           unzip -q sdks.zip
           mv sdks-master/*.sdk sdks/
-          ls sdks/
 
           SDK=$(ls -d sdks/iPhoneOS1*.sdk 2>/dev/null | sort -V | tail -n1)
           echo "SDK=$SDK"
@@ -114,15 +113,7 @@ jobs:
           mkdir -p Payload/Snapchat.app/Frameworks
           cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/
 
-          # Try optool (mac binary may not run); dylib is still in Frameworks
-          curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip || true
-          unzip -o optool.zip || true
-          chmod +x optool || true
-          if [ -f optool ] && file optool | grep -q ELF; then
-            ./optool install -c load -p "@executable_path/Frameworks/SecretShot.dylib" -t Payload/Snapchat.app/Snapchat || true
-          else
-            echo "optool not usable on Linux - dylib placed; load command may need Mac/optool later"
-          fi
+          echo "Dylib placed in Frameworks. Load command injection requires Mac optool or insert_dylib."
 
           7z a -tzip ../Snapchat-Patched.ipa Payload
           ls -lh ../Snapchat-Patched.ipa
