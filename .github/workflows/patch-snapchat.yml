@@ -1,0 +1,71 @@
+name: Patch Snapchat IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: 'Direct Dropbox (or any) URL ending with ?dl=1'
+        required: true
+        type: string
+      dylib_url:
+        description: 'Optional URL to the screenshot-bypass .dylib (leave empty to skip injection)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download original IPA
+        run: |
+          echo "Downloading IPA..."
+          curl -L --fail -o original.ipa "${{ github.event.inputs.ipa_url }}"
+          ls -lh original.ipa
+
+      - name: Download dylib (if provided)
+        if: ${{ github.event.inputs.dylib_url != '' }}
+        run: |
+          curl -L --fail -o SecretShot.dylib "${{ github.event.inputs.dylib_url }}"
+          ls -lh SecretShot.dylib
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+          # optool is the classic injection tool
+          wget -q https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip
+          unzip -o optool.zip
+          chmod +x optool
+
+      - name: Inject dylib and rebuild IPA
+        run: |
+          mkdir work
+          cd work
+          7z x ../original.ipa
+          
+          if [ -f ../SecretShot.dylib ]; then
+            echo "Injecting dylib..."
+            mkdir -p Payload/Snapchat.app/Frameworks
+            cp ../SecretShot.dylib Payload/Snapchat.app/Frameworks/
+            ../optool install -c load \
+              -p "@executable_path/Frameworks/SecretShot.dylib" \
+              -t Payload/Snapchat.app/Snapchat
+          else
+            echo "No dylib provided – skipping injection"
+          fi
+          
+          # Re-zip
+          7z a -tzip ../Snapchat-Patched.ipa Payload
+          cd ..
+          ls -lh Snapchat-Patched.ipa
+
+      - name: Upload patched IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Snapchat-Patched
+          path: Snapchat-Patched.ipa
+          retention-days: 5
