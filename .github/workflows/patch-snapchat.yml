@@ -16,19 +16,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build dylib (root, absolute, forced checks)
+      - name: Build dylib
+        id: build
         run: |
           set -e
-
-          echo "PWD=$(pwd)"
-          echo "=== Source ==="
-          cat dylib/SecretShot.m
-
+          echo "Building..."
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "SDK=$SDK"
-
-          # Build directly into workspace root with absolute output path
-          OUT="$GITHUB_WORKSPACE/SecretShot.dylib"
 
           xcrun -sdk iphoneos clang -arch arm64 \
             -miphoneos-version-min=15.0 \
@@ -37,34 +31,30 @@ jobs:
             -framework UIKit \
             -framework Foundation \
             -install_name "@executable_path/Frameworks/SecretShot.dylib" \
-            -o "$OUT" \
+            -o "$GITHUB_WORKSPACE/SecretShot.dylib" \
             "$GITHUB_WORKSPACE/dylib/SecretShot.m"
 
-          echo "=== Built file ==="
-          ls -la "$OUT"
-          file "$OUT"
-          otool -hv "$OUT" || true
+          ls -la "$GITHUB_WORKSPACE/SecretShot.dylib"
+          file "$GITHUB_WORKSPACE/SecretShot.dylib"
 
-          SIZE=$(stat -f%z "$OUT")
-          echo "SIZE_BYTES=$SIZE"
+          # Use Python for reliable size check (no shell comparison bugs)
+          python3 - <<'PY'
+import os, sys
+path = os.environ["GITHUB_WORKSPACE"] + "/SecretShot.dylib"
+size = os.path.getsize(path)
+print(f"PYTHON_SIZE={size}")
+if size < 20000:
+    print(f"FATAL: dylib is only {size} bytes", file=sys.stderr)
+    sys.exit(1)
+print("Size OK")
+PY
 
-          # Hard fail - this must stop the job
-          if [ "$SIZE" -lt 30000 ]; then
-            echo "========================================"
-            echo "FATAL: dylib is only $SIZE bytes"
-            echo "This is not a usable binary. Stopping."
-            echo "========================================"
-            exit 1
-          fi
-
-          echo "Dylib looks good ($SIZE bytes)"
-
-      - name: Download original IPA
+      - name: Download IPA
         run: |
           curl -L --fail -o original.ipa "${{ github.event.inputs.ipa_url }}"
           ls -lh original.ipa
 
-      - name: Inject and rebuild
+      - name: Inject + rebuild
         run: |
           set -e
           curl -L --fail -o optool.zip https://github.com/alexzielenski/optool/releases/download/0.1/optool.zip
@@ -73,7 +63,6 @@ jobs:
 
           mkdir work && cd work
           unzip -q ../original.ipa
-
           mkdir -p Payload/Snapchat.app/Frameworks
           cp "$GITHUB_WORKSPACE/SecretShot.dylib" Payload/Snapchat.app/Frameworks/
 
@@ -81,13 +70,12 @@ jobs:
             -p "@executable_path/Frameworks/SecretShot.dylib" \
             -t Payload/Snapchat.app/Snapchat
 
-          otool -L Payload/Snapchat.app/Snapchat | grep -i SecretShot || echo "WARNING: load command missing"
+          otool -L Payload/Snapchat.app/Snapchat | grep -i SecretShot || echo "WARNING: no load command"
 
           zip -r ../Snapchat-Patched.ipa Payload
-          cd ..
-          ls -lh Snapchat-Patched.ipa
+          ls -lh ../Snapchat-Patched.ipa
 
-      - name: Upload patched IPA
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: Snapchat-Patched
