@@ -16,17 +16,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build SecretShot dylib with clang (direct)
+      - name: Build SecretShot dylib with clang (strict)
         run: |
-          set -e
+          set -ex
+
+          echo "=== Source file ==="
+          ls -la dylib/
+          cat dylib/SecretShot.m
+
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK = $SDK"
+          ls "$SDK" | head
+
           cd dylib
 
-          # Use the iOS SDK that ships with Xcode on the runner
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "Using SDK: $SDK"
-
-          clang -arch arm64 \
-            -isysroot "$SDK" \
+          # Compile with maximum visibility
+          xcrun -sdk iphoneos clang -arch arm64 \
             -miphoneos-version-min=15.0 \
             -fobjc-arc \
             -dynamiclib \
@@ -36,26 +41,27 @@ jobs:
             -o SecretShot.dylib \
             SecretShot.m
 
-          echo "===== Built dylib ====="
-          ls -lh SecretShot.dylib
+          echo "=== After clang ==="
+          ls -la SecretShot.dylib
           file SecretShot.dylib
-          otool -hv SecretShot.dylib | head -20
+          otool -hv SecretShot.dylib || true
+          otool -l SecretShot.dylib | head -40 || true
 
           SIZE=$(stat -f%z SecretShot.dylib)
-          echo "Size: $SIZE bytes"
+          echo "SIZE=$SIZE"
 
-          if [ "$SIZE" -lt 20000 ]; then
-            echo "ERROR: dylib still too small"
+          if [ "$SIZE" -lt 30000 ]; then
+            echo "FATAL: dylib is only $SIZE bytes – this is not a real binary"
             exit 1
           fi
 
           if ! file SecretShot.dylib | grep -q "arm64"; then
-            echo "ERROR: not arm64"
+            echo "FATAL: not arm64"
             exit 1
           fi
 
-          cp SecretShot.dylib $GITHUB_WORKSPACE/SecretShot.dylib
-          ls -lh $GITHUB_WORKSPACE/SecretShot.dylib
+          cp -v SecretShot.dylib $GITHUB_WORKSPACE/SecretShot.dylib
+          ls -la $GITHUB_WORKSPACE/SecretShot.dylib
 
       - name: Download original IPA
         run: |
@@ -79,7 +85,7 @@ jobs:
             -p "@executable_path/Frameworks/SecretShot.dylib" \
             -t Payload/Snapchat.app/Snapchat
 
-          echo "===== Verifying load command ====="
+          echo "=== Load commands ==="
           otool -L Payload/Snapchat.app/Snapchat | grep -i SecretShot || echo "WARNING: load command missing"
 
           zip -r ../Snapchat-Patched.ipa Payload
